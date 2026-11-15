@@ -1,0 +1,33 @@
+[project]
+name = "onibus-ia"
+version = "0.1.0"
+description = "Stop-to-stop bus travel time prediction for Rio de Janeiro (UFF AI course)."
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.1",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "structlog>=24.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pandas-stubs>=2.2",
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

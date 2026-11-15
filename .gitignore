@@ -1,0 +1,26 @@
+# Data (large files live on Google Drive, not in Git)
+dados/
+*.parquet
+*.csv
+*.zip
+*.tar.bz2
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Secrets (never commit)
+.env
+kaggle.json
