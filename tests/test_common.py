@@ -64,3 +64,13 @@ def test_baseline_and_evaluate() -> None:
 def test_p1_functions_are_pending() -> None:
     with pytest.raises(NotImplementedError):
         common.split(synthetic_segments())
+
+
+def test_prepare_removes_implausible_rows_and_reports() -> None:
+    segments = synthetic_segments().assign(service_date="2019-03-04")
+    segments.loc[0, "travel_time_s"] = 5.0  # 300 m in 5 s = 216 km/h
+    cleaned = common.prepare(segments)
+    report = cleaned.attrs["prepare_report"]
+    assert len(cleaned) == 3
+    assert report["implausible_speed"] == 1
+    assert report["rows_in"] - report["rows_out"] == 1

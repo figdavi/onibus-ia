@@ -2,7 +2,7 @@
 
 Contract (Portuguese aliases at the bottom keep the names agreed with the pair):
 
-- ``prepare(df) -> df``            (P1) remove outliers and low-quality segments
+- ``prepare(df) -> df``            remove outliers and low-quality segments
 - ``split(df) -> train, val, test``(P1) temporal split by service date
 - ``build_features(df) -> X, y``   (P2) model inputs and target
 - ``evaluate(model, X, y) -> dict``(P2) MAE, RMSE and R2
@@ -37,6 +37,11 @@ CARNIVAL_END = pd.Timestamp("2019-03-06")
 
 DIRECTIONS = ["Leblon", "Usina"]
 
+MIN_DAY_FRACTION = 0.25
+MIN_SPEED_KMH = 3.0
+MAX_SPEED_KMH = 60.0
+MIN_TRAVEL_TIME_S = 10.0
+
 NUMERIC_FEATURES = [
     "hour",
     "hour_sin",
@@ -64,23 +69,50 @@ class Regressor(Protocol):
 
 
 def prepare(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove outliers and low-quality segments (owner: P1).
+    """Remove outliers and low-quality data with fixed physical rules.
 
-    Expected behavior:
-        - drop segments whose ``max_gap_s`` is too high (GPS too sparse);
-        - drop ``travel_time_s`` outliers (e.g. outside p1-p99 per segment);
-        - document every rule and its impact (rows removed) in the notebook.
+    Rules use fixed thresholds instead of percentiles of the whole table, so no
+    information from the test period leaks into cleaning. Numbers below were
+    measured on line 415 (2019-01-25 to 2019-03-21):
+
+    1. Sparse days: days with fewer than 25% of the median segments per day
+       (only 2019-03-10, a GPS outage) are dropped.
+    2. Implausible speed: segment speed outside 3-60 km/h (0.55% of rows).
+       Below 3 km/h the bus is parked (layover); above 60 km/h is a GPS error.
+    3. Too short: travel time under 10 s (0.06%), a stop-and-go artifact.
+
+    Pings more than 300 s apart are already rejected by the pipeline
+    (``max_gap_s`` <= 300), so no extra gap rule is needed here.
 
     Args:
         df: Segments table from ``segments_415_v0.parquet``.
 
     Returns:
-        Cleaned table with the same columns.
-
-    Raises:
-        NotImplementedError: Until P1 implements it.
+        Cleaned copy of ``df``. ``result.attrs["prepare_report"]`` holds the
+        number of rows removed by each rule (for the report).
     """
-    raise NotImplementedError("prepare() is owned by P1")
+    out = df.copy()
+    report: dict[str, int] = {"rows_in": len(out)}
+
+    per_day = out.groupby("service_date")[TARGET].transform("size")
+    sparse_day = (
+        per_day < MIN_DAY_FRACTION * out.groupby("service_date").size().median()
+    )
+    report["sparse_days"] = int(sparse_day.sum())
+    out = out[~sparse_day]
+
+    speed_kmh = out["distance_m"] / out[TARGET] * 3.6
+    implausible = ~speed_kmh.between(MIN_SPEED_KMH, MAX_SPEED_KMH)
+    report["implausible_speed"] = int(implausible.sum())
+    out = out[~implausible]
+
+    too_short = out[TARGET] < MIN_TRAVEL_TIME_S
+    report["too_short"] = int(too_short.sum())
+    out = out[~too_short].copy()
+
+    report["rows_out"] = len(out)
+    out.attrs["prepare_report"] = report
+    return out
 
 
 def split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
