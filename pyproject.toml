@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.0",
     "pandas>=2.2",
     "pyarrow>=17.0",
+    "scikit-learn>=1.9.1",
     "structlog>=24.1",
 ]
 
