@@ -10,6 +10,8 @@ Usamos 56 dias de GPS da linha 415 (Usina–Leblon), de 25/01 a 21/03/2019, um p
 
 ## 2. Metodologia (partes da P1)
 
+**Limpeza.** Usamos regras físicas fixas (`common.prepare`), iguais para treino, validação e teste: tiramos o dia 10/03 (falha de GPS), trechos com velocidade fora de 3–60 km/h e tempos abaixo de 10 s. Sobram 99,3% dos 370.784 trechos. Não cortamos pela qualidade do GPS (`max_gap_s`, o maior intervalo entre os pings usados): a EDA mostrou que trechos com pings mais espaçados são mais lentos (índice de lentidão 0,78 com intervalo até 60 s, contra 1,08 acima de 240 s), então o corte enviesaria a base para os trechos rápidos. Testamos a alternativa (corte em 240 s e percentis p1–p99 por trecho): no mesmo teste, o LightGBM piora de 16,35 s para 16,61 s, e só parece melhorar (15,36 s) quando a mesma limpeza é aplicada ao teste, porque retira dele os casos difíceis.
+
 **Divisão dos dados.** A divisão é temporal e sem embaralhamento, porque o modelo seria usado para prever o futuro a partir do passado: treino até 03/03 (253.819 trechos), validação de 04 a 07/03 (19.668) e teste de 11 a 20/03 (78.918). Os dias 08 a 10/03 ficam de fora como intervalo, e 10/03 e 21/03 são descartados por falha de coleta (o GPS para às 7h e às 8h30). A validação cai na semana do Carnaval, que é atípica; ela serve para escolher hiperparâmetros, e os resultados reportados são os do teste.
 
 **Ridge.** Regressão linear com regularização L2. Como o modelo só soma efeitos, as variáveis categóricas entram em *one-hot*: uma coluna por trecho (sentido × parada) e uma por hora × tipo de dia (útil, sábado, domingo, Carnaval). As variáveis numéricas (distância, mediana histórica do trecho, lags e ritmo da viagem) entram em logaritmo e padronizadas, e os valores ausentes recebem a mediana do treino mais uma coluna indicadora. O alvo também é previsto em logaritmo, o que torna os efeitos multiplicativos e reduz o peso da cauda longa. O `alpha` é escolhido pelo MAE na validação.
@@ -39,11 +41,16 @@ O erro acompanha a curva de lentidão: é menor de madrugada (cerca de 6 s) e ma
 
 ![Erro por hora do dia no teste](figuras/p1_erro_por_hora.png)
 
-**Experimento extra.** Treinar um LightGBM separado para cada sentido não melhora o resultado (16,38 s contra 16,35 s do modelo único). O modelo único já recebe o sentido como variável e separa os dois trajetos sozinho.
+**Experimento extra.** A base com 5 linhas não foi gerada a tempo, então comparamos um modelo por sentido com o modelo único. Treinar um LightGBM separado para cada sentido não melhora o resultado (16,38 s contra 16,35 s do modelo único). O modelo único já recebe o sentido como variável e separa os dois trajetos sozinho.
+
+**Quantidade de dados.** Treinando o LightGBM só com os últimos N dias do treino, o erro no teste cai de 17,54 s (3 dias) para 16,38 s (28 dias) e 16,35 s (38 dias): a curva fica plana a partir de cerca de 3 semanas. Para uma linha, os dados são suficientes; mais dados só seriam necessários para estudar outras linhas.
+
+![Curva de aprendizado](figuras/p1_curva_aprendizado.png)
 
 ## 4. Pontos para a Conclusão e para as limitações
 
 - O melhor modelo da P1 é o LightGBM com perda L1, com erro médio de 16,4 s por trecho.
 - A informação de trânsito em tempo real vale mais que a escolha do algoritmo.
+- Os 38 dias de treino bastam para a linha 415: mais dias da mesma linha não reduzem o erro.
 - O erro de medição do próprio pipeline (holdout de pings) é de cerca de 25 s, da mesma ordem do erro dos modelos. Parte do erro restante é ruído de medição.
 - A base não cobre a linha inteira: no Centro, quase não há trechos medidos (ver a revisão do pipeline), então a soma dos trechos ainda não dá o tempo de uma viagem completa.
