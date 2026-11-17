@@ -1,27 +1,15 @@
-"""Shared preprocessing of the stop-to-stop segments table.
+"""Calendar helpers for the temporal EDA notebook.
 
-Steps, in the order they must be applied:
-
-1. ``add_calendar``: hour, weekday, day type and the Carnival flag.
-2. ``filter_quality``: drop segments timed from pings that were too far apart.
-3. ``temporal_split``: train on the past, validate on Carnival week, test on
-   the future (no shuffling).
-4. ``fit_outlier_bounds`` on the training set only, then ``apply_outlier_bounds``
-   to every split. Segments with too few training samples are dropped, because
-   neither the bounds nor the models can be estimated for them.
-
-``prepare`` runs all of it and returns the three splits.
+The cleaning and the split used by every model live in ``common.py``
+(``common.prepare`` and ``common.split``). This module only adds the calendar
+columns the EDA groups by.
 
 Usage:
-    from prep import prepare
-    splits = prepare(pd.read_parquet("segments_415_v0.parquet"))
-    splits.train, splits.val, splits.test
+    from prep import add_calendar
+    segments = add_calendar(pd.read_parquet("segments_415_v0.parquet"))
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-from datetime import date
 
 import pandas as pd
 
@@ -29,24 +17,7 @@ import common
 
 SEGMENT_KEY = ["line", "direction", "stop_seq"]
 
-CARNIVAL_START = date(2019, 3, 2)
-CARNIVAL_END = date(2019, 3, 6)
-
-MAX_GAP_S = 240.0
-LOWER_QUANTILE = 0.01
-UPPER_QUANTILE = 0.99
-MIN_TRAIN_SAMPLES = 30
-
 WEEKDAY_NAMES = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
-
-
-@dataclass(frozen=True)
-class Splits:
-    """Train, validation and test sets, already cleaned."""
-
-    train: pd.DataFrame
-    val: pd.DataFrame
-    test: pd.DataFrame
 
 
 def add_calendar(segments: pd.DataFrame) -> pd.DataFrame:
@@ -61,12 +32,12 @@ def add_calendar(segments: pd.DataFrame) -> pd.DataFrame:
     """
     out = segments.copy()
     ts = pd.to_datetime(out["departure_ts"])
-    service_date = pd.to_datetime(out["service_date"]).dt.date
+    service_date = pd.to_datetime(out["service_date"])
     out["hour"] = ts.dt.hour
     out["weekday"] = ts.dt.day_of_week
     out["is_weekend"] = out["weekday"] >= 5
-    out["is_carnival"] = (service_date >= CARNIVAL_START) & (
-        service_date <= CARNIVAL_END
+    out["is_carnival"] = service_date.between(
+        common.CARNIVAL_START, common.CARNIVAL_END
     )
     day_type = pd.Series("útil", index=out.index)
     day_type[out["weekday"] == 5] = "sábado"
@@ -74,95 +45,3 @@ def add_calendar(segments: pd.DataFrame) -> pd.DataFrame:
     day_type[out["is_carnival"]] = "carnaval"
     out["day_type"] = day_type
     return out
-
-
-def filter_quality(
-    segments: pd.DataFrame, max_gap_s: float = MAX_GAP_S
-) -> pd.DataFrame:
-    """Keep segments whose worst bracketing ping gap is at most ``max_gap_s``.
-
-    Args:
-        segments: Segments table with ``max_gap_s``.
-        max_gap_s: Largest accepted gap between the pings used to time a stop.
-
-    Returns:
-        Filtered copy.
-    """
-    return segments[segments["max_gap_s"] <= max_gap_s].copy()
-
-
-def temporal_split(
-    segments: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split by service date; the dates live in ``common.split``.
-
-    Args:
-        segments: Segments table with ``service_date``.
-
-    Returns:
-        Train, validation and test frames.
-    """
-    return common.split(segments)
-
-
-def fit_outlier_bounds(
-    train: pd.DataFrame,
-    lower: float = LOWER_QUANTILE,
-    upper: float = UPPER_QUANTILE,
-    min_samples: int = MIN_TRAIN_SAMPLES,
-) -> pd.DataFrame:
-    """Per-segment travel-time bounds estimated on the training set.
-
-    Args:
-        train: Training segments.
-        lower: Lower quantile.
-        upper: Upper quantile.
-        min_samples: Segments with fewer training rows get no bounds.
-
-    Returns:
-        One row per segment key with ``tt_low``, ``tt_high`` and ``n_train``.
-    """
-    grouped = train.groupby(SEGMENT_KEY)["travel_time_s"]
-    bounds = pd.DataFrame(
-        {
-            "tt_low": grouped.quantile(lower),
-            "tt_high": grouped.quantile(upper),
-            "n_train": grouped.size(),
-        }
-    )
-    return bounds[bounds["n_train"] >= min_samples].reset_index()
-
-
-def apply_outlier_bounds(segments: pd.DataFrame, bounds: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows outside their segment bounds, or of segments without bounds.
-
-    Args:
-        segments: Any split.
-        bounds: Output of ``fit_outlier_bounds``.
-
-    Returns:
-        Filtered copy (same columns as the input).
-    """
-    merged = segments.merge(bounds, on=SEGMENT_KEY, how="inner")
-    inside = merged["travel_time_s"].between(merged["tt_low"], merged["tt_high"])
-    return merged[inside].drop(columns=["tt_low", "tt_high", "n_train"])
-
-
-def prepare(segments: pd.DataFrame, max_gap_s: float = MAX_GAP_S) -> Splits:
-    """Full preprocessing: calendar, quality filter, split and outliers.
-
-    Args:
-        segments: Raw output of ``rio_segments.py``.
-        max_gap_s: Quality threshold passed to ``filter_quality``.
-
-    Returns:
-        Cleaned train, validation and test sets.
-    """
-    clean = filter_quality(add_calendar(segments), max_gap_s)
-    train, val, test = temporal_split(clean)
-    bounds = fit_outlier_bounds(train)
-    return Splits(
-        train=apply_outlier_bounds(train, bounds).reset_index(drop=True),
-        val=apply_outlier_bounds(val, bounds).reset_index(drop=True),
-        test=apply_outlier_bounds(test, bounds).reset_index(drop=True),
-    )
