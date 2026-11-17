@@ -47,13 +47,13 @@ def test_calendar_flags_carnival_and_weekday() -> None:
 
 
 def test_build_features_has_fixed_columns() -> None:
-    X, y = common.build_features(synthetic_segments())
+    X, y = common.build_features(synthetic_segments(), reference=synthetic_segments())
     assert {"direction_Leblon", "direction_Usina"} <= set(X.columns)
     assert len(X) == len(y) == 4
 
 
 def test_baseline_and_evaluate() -> None:
-    X, y = common.build_features(synthetic_segments())
+    X, y = common.build_features(synthetic_segments(), reference=synthetic_segments())
     baseline = common.MedianBaseline().fit(X, y)
     metrics = common.evaluate(baseline, X, y)
     assert metrics["MAE_s"] == 0.0
@@ -83,3 +83,25 @@ def test_split_is_temporal_and_skips_buffer_days() -> None:
     assert test["service_date"].min() == pd.Timestamp("2019-03-11").date()
     assert test["service_date"].max() == pd.Timestamp("2019-03-20").date()
     assert len(train) + len(val) + len(test) == len(table) - 4
+
+
+def test_profile_features_use_reference_and_past_only() -> None:
+    segments = synthetic_segments()
+    reference = segments.assign(travel_time_s=segments["travel_time_s"] * 2)
+    enriched = common.add_profile_features(segments, reference).sort_values(
+        ["trip_id", "stop_seq"]
+    )
+    first_bus = enriched[enriched["trip_id"] == "A-1"]
+
+    assert first_bus["segment_median_s"].tolist() == [120.0, 180.0]
+    assert pd.isna(first_bus["trip_pace_last"].iloc[0])
+    assert first_bus["trip_pace_last"].iloc[1] == 0.5  # 60 s / 120 s
+    assert first_bus["trip_pace_mean"].iloc[1] == 0.5
+
+
+def test_recent_buses_mean_only_counts_arrived_buses() -> None:
+    enriched = common.add_lag_features(synthetic_segments())
+    second_bus = enriched[enriched["trip_id"] == "B-1"].sort_values("stop_seq")
+    first_bus = enriched[enriched["trip_id"] == "A-1"]
+    assert second_bus["recent_buses_mean_s"].tolist() == [60.0, 90.0]
+    assert first_bus["recent_buses_mean_s"].isna().all()

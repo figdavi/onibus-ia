@@ -4,7 +4,7 @@ Contract (Portuguese aliases at the bottom keep the names agreed with the pair):
 
 - ``prepare(df) -> df``            remove outliers and low-quality segments
 - ``split(df) -> train, val, test``(P1) temporal split by service date
-- ``build_features(df) -> X, y``   (P2) model inputs and target
+- ``build_features(df, reference) -> X, y`` (P2) model inputs and target
 - ``evaluate(model, X, y) -> dict``(P2) MAE, RMSE and R2
 - ``MedianBaseline``               (P2) reference model
 - ``scaled(model)``                (P2) imputer + scaler wrapper for Ridge and MLP
@@ -13,8 +13,8 @@ Typical use in a notebook::
 
     df = prepare(pd.read_parquet(PATH))
     train, val, test = split(df)
-    X_train, y_train = build_features(train)
-    X_test, y_test = build_features(test)
+    X_train, y_train = build_features(train, reference=train)
+    X_test, y_test = build_features(test, reference=train)
     model = scaled(Ridge()).fit(X_train, y_train)
     evaluate(model, X_test, y_test)
 """
@@ -58,7 +58,13 @@ NUMERIC_FEATURES = [
     "lag_previous_segment_s",
     "lag_previous_bus_s",
     "minutes_since_previous_bus",
+    "recent_buses_mean_s",
+    "segment_median_s",
+    "trip_pace_last",
+    "trip_pace_mean",
 ]
+
+RECENT_BUSES = 3
 
 
 class Regressor(Protocol):
@@ -148,6 +154,23 @@ def split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 # --------------------------------------------------------------------------- #
 
 
+def previous_buses(df: pd.DataFrame, k: int) -> tuple[pd.Series, pd.Series]:
+    """Departure and travel time of the k-th previous bus on the same segment.
+
+    Args:
+        df: Segments table with ``direction``, ``stop_seq`` and ``departure_ts``.
+        k: 1 for the bus right before, 2 for the one before it, and so on.
+
+    Returns:
+        Departure timestamps and travel times (seconds), aligned with ``df``.
+    """
+    ordered = df.sort_values("departure_ts")
+    by_segment = ordered.groupby(["direction", "stop_seq"])
+    departure = by_segment["departure_ts"].shift(k).reindex(df.index)
+    travel = by_segment[TARGET].shift(k).reindex(df.index)
+    return departure, travel
+
+
 def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add lag features that are known at departure time (no leakage).
 
@@ -157,12 +180,14 @@ def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
       bus, only if that bus had already arrived at the current departure time.
     - ``minutes_since_previous_bus``: time since the previous bus left the same
       stop (headway).
+    - ``recent_buses_mean_s``: mean travel time of the last ``RECENT_BUSES``
+      buses on the same segment that had already arrived.
 
     Args:
         df: Segments table with ``departure_ts`` as datetime.
 
     Returns:
-        Copy of ``df`` with the three lag columns (NaN when unknown).
+        Copy of ``df`` with the lag columns (NaN when unknown).
     """
     out = df.sort_values("departure_ts").copy()
 
@@ -172,14 +197,63 @@ def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     consecutive = previous_seq == out.loc[previous_seq.index, "stop_seq"] - 1
     out["lag_previous_segment_s"] = previous_time.where(consecutive)
 
-    by_segment = out.groupby(["direction", "stop_seq"])
-    previous_departure = by_segment["departure_ts"].shift(1)
-    previous_travel = by_segment[TARGET].shift(1)
-    previous_arrival = previous_departure + pd.to_timedelta(previous_travel, unit="s")
-    already_arrived = previous_arrival <= out["departure_ts"]
-    out["lag_previous_bus_s"] = previous_travel.where(already_arrived)
-    headway = (out["departure_ts"] - previous_departure).dt.total_seconds() / 60
-    out["minutes_since_previous_bus"] = headway
+    known_travel = []
+    for k in range(1, RECENT_BUSES + 1):
+        departure, travel = previous_buses(out, k)
+        arrival = departure + pd.to_timedelta(travel, unit="s")
+        known_travel.append(travel.where(arrival <= out["departure_ts"]))
+        if k == 1:
+            headway = (out["departure_ts"] - departure).dt.total_seconds() / 60
+            out["minutes_since_previous_bus"] = headway
+    out["lag_previous_bus_s"] = known_travel[0]
+    out["recent_buses_mean_s"] = pd.concat(known_travel, axis=1).mean(axis=1)
+    return out
+
+
+def segment_medians(reference: pd.DataFrame) -> pd.Series:
+    """Median travel time per (direction, stop_seq) in the reference table.
+
+    Args:
+        reference: Training segments (never validation or test).
+
+    Returns:
+        Medians indexed by (direction, stop_seq).
+    """
+    medians = reference.groupby(["direction", "stop_seq"])[TARGET].median()
+    return medians.rename("segment_median_s")
+
+
+def add_profile_features(df: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    """Add the typical time of each segment and how fast the trip is running.
+
+    - ``segment_median_s``: median of the segment in ``reference`` (training).
+    - ``trip_pace_last``: previous segment of the trip divided by its median
+      (1.2 means the bus just ran 20% slower than usual).
+    - ``trip_pace_mean``: mean of that ratio over all previous segments of the
+      trip (is this trip slow today?).
+
+    Args:
+        df: Segments table.
+        reference: Training segments used for the medians. Passing the test
+            table here leaks the answer into the features.
+
+    Returns:
+        Copy of ``df`` with the three columns (NaN when unknown).
+    """
+    out = df.join(segment_medians(reference), on=["direction", "stop_seq"])
+    ordered = out.sort_values(["trip_id", "stop_seq"])
+    ratio = ordered[TARGET] / ordered["segment_median_s"]
+    by_trip = ratio.groupby(ordered["trip_id"])
+    consecutive = (
+        ordered.groupby("trip_id")["stop_seq"].shift(1) == ordered["stop_seq"] - 1
+    )
+    out["trip_pace_last"] = by_trip.shift(1).where(consecutive)
+
+    filled = ratio.fillna(0.0)
+    valid = ratio.notna().astype(float)
+    cumulative = filled.groupby(ordered["trip_id"]).cumsum() - filled
+    count = valid.groupby(ordered["trip_id"]).cumsum() - valid
+    out["trip_pace_mean"] = (cumulative / count.where(count > 0)).reindex(out.index)
     return out
 
 
@@ -205,7 +279,39 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def enrich(df: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    """All feature columns added to the segments table (used by ETA too).
+
+    Args:
+        df: Segments table.
+        reference: Training segments (see ``add_profile_features``).
+
+    Returns:
+        Copy of ``df`` with lag, profile and calendar columns.
+    """
+    with_lags = add_lag_features(df)
+    return add_calendar_features(add_profile_features(with_lags, reference))
+
+
+def to_matrix(enriched: pd.DataFrame) -> pd.DataFrame:
+    """Select the model columns and one-hot encode the direction.
+
+    Args:
+        enriched: Output of ``enrich`` (or a copy with modified columns).
+
+    Returns:
+        Feature matrix with fixed columns, as float.
+    """
+    direction = pd.Categorical(enriched["direction"], categories=DIRECTIONS)
+    direction_dummies = pd.get_dummies(direction, prefix="direction", dtype=int)
+    direction_dummies.index = enriched.index
+    X = pd.concat([enriched[NUMERIC_FEATURES], direction_dummies], axis=1)
+    return X.astype(float)
+
+
+def build_features(
+    df: pd.DataFrame, reference: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.Series]:
     """Model inputs ``X`` and target ``y`` (owner: P2).
 
     Categorical columns are one-hot encoded with fixed categories, so train and
@@ -213,19 +319,18 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     (LightGBM natively, Random Forest after imputation) and ``scaled()`` imputes
     them for Ridge and MLP.
 
+    Always pass the **training** table as ``reference``, also for validation
+    and test: ``build_features(test, reference=train)``.
+
     Args:
         df: Segments table (any subset: train, validation or test).
+        reference: Training segments, source of the segment medians.
 
     Returns:
         ``X`` (features) and ``y`` (``travel_time_s`` in seconds).
     """
-    enriched = add_calendar_features(add_lag_features(df))
-    direction = pd.Categorical(enriched["direction"], categories=DIRECTIONS)
-    direction_dummies = pd.get_dummies(direction, prefix="direction", dtype=int)
-    direction_dummies.index = enriched.index
-
-    X = pd.concat([enriched[NUMERIC_FEATURES], direction_dummies], axis=1)
-    return X.astype(float), enriched[TARGET].astype(float)
+    enriched = enrich(df, reference)
+    return to_matrix(enriched), enriched[TARGET].astype(float)
 
 
 def scaled(model: Any) -> Pipeline:
