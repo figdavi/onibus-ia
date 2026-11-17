@@ -25,14 +25,12 @@ from datetime import date
 
 import pandas as pd
 
+import common
+
 SEGMENT_KEY = ["line", "direction", "stop_seq"]
 
 CARNIVAL_START = date(2019, 3, 2)
 CARNIVAL_END = date(2019, 3, 6)
-
-TRAIN_END = date(2019, 3, 3)
-VAL_START, VAL_END = date(2019, 3, 4), date(2019, 3, 7)
-TEST_START, TEST_END = date(2019, 3, 11), date(2019, 3, 20)
 
 MAX_GAP_S = 240.0
 LOWER_QUANTILE = 0.01
@@ -96,10 +94,7 @@ def filter_quality(
 def temporal_split(
     segments: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split by service date: train <= 03/03, val 04-07/03, test 11-20/03.
-
-    08-10/03 are left out as a buffer (10/03 is almost empty) and 21/03 is a
-    partial day.
+    """Split by service date; the dates live in ``common.split``.
 
     Args:
         segments: Segments table with ``service_date``.
@@ -107,11 +102,7 @@ def temporal_split(
     Returns:
         Train, validation and test frames.
     """
-    day = pd.to_datetime(segments["service_date"]).dt.date
-    train = segments[day <= TRAIN_END]
-    val = segments[(day >= VAL_START) & (day <= VAL_END)]
-    test = segments[(day >= TEST_START) & (day <= TEST_END)]
-    return train.copy(), val.copy(), test.copy()
+    return common.split(segments)
 
 
 def fit_outlier_bounds(

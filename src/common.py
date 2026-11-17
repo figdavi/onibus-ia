@@ -35,6 +35,10 @@ TARGET = "travel_time_s"
 CARNIVAL_START = pd.Timestamp("2019-03-02")
 CARNIVAL_END = pd.Timestamp("2019-03-06")
 
+TRAIN_END = pd.Timestamp("2019-03-03")
+VAL_START, VAL_END = pd.Timestamp("2019-03-04"), pd.Timestamp("2019-03-07")
+TEST_START, TEST_END = pd.Timestamp("2019-03-11"), pd.Timestamp("2019-03-20")
+
 DIRECTIONS = ["Leblon", "Usina"]
 
 MIN_DAY_FRACTION = 0.25
@@ -118,21 +122,25 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
 def split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Temporal split by ``service_date`` (owner: P1).
 
-    Expected behavior:
-        - train: 2019-01-25 to 2019-03-03;
+    Train on the past, test on the future, never shuffled:
+        - train: up to 2019-03-03;
         - validation: 2019-03-04 to 2019-03-07 (includes Carnival);
         - test: 2019-03-11 to 2019-03-20.
+
+    2019-03-08 to 2019-03-10 are left out as a buffer (03-10 is a GPS outage)
+    and 2019-03-21 is a partial day.
 
     Args:
         df: Prepared segments table.
 
     Returns:
-        Train, validation and test tables.
-
-    Raises:
-        NotImplementedError: Until P1 implements it.
+        Train, validation and test tables (copies).
     """
-    raise NotImplementedError("split() is owned by P1")
+    day = pd.to_datetime(df["service_date"])
+    train = df[day <= TRAIN_END]
+    val = df[day.between(VAL_START, VAL_END)]
+    test = df[day.between(TEST_START, TEST_END)]
+    return train.copy(), val.copy(), test.copy()
 
 
 # --------------------------------------------------------------------------- #
@@ -316,5 +324,6 @@ def metrics_table(results: dict[str, dict[str, float]]) -> pd.DataFrame:
 
 # Portuguese aliases (names agreed with the pair).
 preparar = prepare
+dividir = split
 features = build_features
 avaliar = evaluate

@@ -1,7 +1,6 @@
 """Unit tests for shared features and evaluation (synthetic data only)."""
 
 import pandas as pd
-import pytest
 
 import common
 
@@ -61,11 +60,6 @@ def test_baseline_and_evaluate() -> None:
     assert metrics["n"] == 4
 
 
-def test_p1_functions_are_pending() -> None:
-    with pytest.raises(NotImplementedError):
-        common.split(synthetic_segments())
-
-
 def test_prepare_removes_implausible_rows_and_reports() -> None:
     segments = synthetic_segments().assign(service_date="2019-03-04")
     segments.loc[0, "travel_time_s"] = 5.0  # 300 m in 5 s = 216 km/h
@@ -74,3 +68,18 @@ def test_prepare_removes_implausible_rows_and_reports() -> None:
     assert len(cleaned) == 3
     assert report["implausible_speed"] == 1
     assert report["rows_in"] - report["rows_out"] == 1
+
+
+def test_split_is_temporal_and_skips_buffer_days() -> None:
+    days = pd.date_range("2019-01-25", "2019-03-21", freq="D")
+    table = pd.DataFrame({"service_date": days.date, "travel_time_s": 60.0})
+
+    train, val, test = common.split(table)
+
+    assert train["service_date"].max() == pd.Timestamp("2019-03-03").date()
+    assert sorted(val["service_date"]) == list(
+        pd.date_range("2019-03-04", "2019-03-07").date
+    )
+    assert test["service_date"].min() == pd.Timestamp("2019-03-11").date()
+    assert test["service_date"].max() == pd.Timestamp("2019-03-20").date()
+    assert len(train) + len(val) + len(test) == len(table) - 4
